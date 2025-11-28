@@ -147,12 +147,15 @@ jobs:
           echo "Created page for $date: $PAGE_ID"
 
           # Build children blocks from activities
-          python3 << PYTHON_EOF
+          cat > /tmp/build_children.py << 'PYTHON_SCRIPT'
 import json
 import sys
+import os
+
+date = sys.argv[1]
 
 # Read activities from file
-with open('/tmp/commits_${date}.txt', 'r') as f:
+with open(f'/tmp/commits_{date}.txt', 'r') as f:
     activities = f.read()
 
 children = []
@@ -195,7 +198,7 @@ for line in activities.split('\n'):
             "bulleted_list_item": {
                 "rich_text": [{
                     "type": "text",
-                    "text": {"content": line[2:].strip()}  # Remove • prefix
+                    "text": {"content": line[2:].strip()}
                 }]
             }
         })
@@ -213,10 +216,11 @@ for line in activities.split('\n'):
         })
 
 # Write to JSON file
-with open('/tmp/children_${date}.json', 'w') as f:
+with open(f'/tmp/children_{date}.json', 'w') as f:
     json.dump({"children": children}, f, ensure_ascii=False, indent=2)
+PYTHON_SCRIPT
 
-PYTHON_EOF
+          python3 /tmp/build_children.py "$date"
 
           # Append blocks to the page
           curl -s -X PATCH "https://api.notion.com/v1/blocks/$PAGE_ID/children" \
