@@ -33,14 +33,15 @@ jobs:
         for repo in $REPOS; do
           echo "Checking repo: $repo"
 
-          # Get commits from the last 24 hours
-          COMMITS=$(gh api "/repos/hey-watchme/$repo/commits?since=$SINCE" --jq '.[] | "- [\(.commit.author.name)] \(.commit.message | split("\n")[0])"' 2>/dev/null || echo "")
+          # Get commits from the last 24 hours with rich formatting
+          COMMITS=$(gh api "/repos/hey-watchme/$repo/commits?since=$SINCE" --jq '.[] | "  • [\(.commit.author.name)] \(.commit.message | split("\n")[0] | .[0:100])"' 2>/dev/null || echo "")
 
           if [ -n "$COMMITS" ]; then
             COMMIT_COUNT=$(echo "$COMMITS" | wc -l | xargs)
             TOTAL_COMMITS=$((TOTAL_COMMITS + COMMIT_COUNT))
 
-            ACTIVITIES="${ACTIVITIES}**${repo}**:\n${COMMITS}\n\n"
+            # Rich format with emoji and better structure
+            ACTIVITIES="${ACTIVITIES}📦 ${repo} (${COMMIT_COUNT} commits)\n${COMMITS}\n\n"
 
             if [ -z "$ACTIVE_REPOS" ]; then
               ACTIVE_REPOS="$repo"
@@ -52,8 +53,11 @@ jobs:
 
         # If no activity, set default message
         if [ $TOTAL_COMMITS -eq 0 ]; then
-          ACTIVITIES="No commits in the last 24 hours"
+          ACTIVITIES="📭 No commits in the last 24 hours"
           ACTIVE_REPOS="None"
+        else
+          # Add header with date
+          ACTIVITIES="📅 Activity Report\n\n${ACTIVITIES}"
         fi
 
         # Save to output (escape newlines for GitHub Actions)

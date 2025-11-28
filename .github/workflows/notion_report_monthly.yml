@@ -30,42 +30,62 @@ jobs:
         # Get all repositories in the organization
         REPOS=$(gh api /orgs/hey-watchme/repos --paginate --jq '.[].name')
 
-        # Group commits by date
-        declare -A COMMITS_BY_DATE
-        TOTAL_COMMITS=0
+        # Temporary file to store all commits with metadata
+        > /tmp/all_commits.txt
 
         for repo in $REPOS; do
           echo "Checking repo: $repo"
 
           # Get commits from the specified period
-          COMMITS=$(gh api "/repos/hey-watchme/$repo/commits?since=$SINCE&per_page=100" --paginate --jq '.[] | "\(.commit.author.date)|\(.commit.author.name)|\(.commit.message | split("\n")[0])|\(env.repo)"' 2>/dev/null || echo "")
-
-          if [ -n "$COMMITS" ]; then
-            while IFS='|' read -r date author message repo_name; do
-              # Extract date (YYYY-MM-DD)
-              commit_date=$(echo "$date" | cut -d'T' -f1)
-
-              # Initialize array if not exists
-              if [ -z "${COMMITS_BY_DATE[$commit_date]}" ]; then
-                COMMITS_BY_DATE[$commit_date]="**${repo_name}**:\n- [${author}] ${message}\n"
-              else
-                COMMITS_BY_DATE[$commit_date]="${COMMITS_BY_DATE[$commit_date]}- [${author}] ${message}\n"
-              fi
-
-              TOTAL_COMMITS=$((TOTAL_COMMITS + 1))
-            done <<< "$COMMITS"
-          fi
+          gh api "/repos/hey-watchme/$repo/commits?since=$SINCE&per_page=100" --paginate \
+            --jq ".[] | \"\(.commit.author.date)|\(.commit.author.name)|\(.commit.message | split(\"\\n\")[0] | .[0:100])|${repo}\"" \
+            2>/dev/null >> /tmp/all_commits.txt || true
         done
 
-        echo "Total commits found: $TOTAL_COMMITS"
-        echo "total_commits=$TOTAL_COMMITS" >> $GITHUB_OUTPUT
+        # Get unique dates
+        DATES=$(cat /tmp/all_commits.txt | cut -d'T' -f1 | sort -u)
 
-        # Save dates for iteration
-        echo "${!COMMITS_BY_DATE[@]}" > /tmp/dates.txt
+        echo "Dates found: $DATES"
+        echo "$DATES" > /tmp/dates.txt
 
-        # Save each date's commits
-        for date in "${!COMMITS_BY_DATE[@]}"; do
-          echo -e "${COMMITS_BY_DATE[$date]}" > "/tmp/commits_${date}.txt"
+        # Group commits by date and repository
+        for date in $DATES; do
+          echo "📅 Activity Report" > "/tmp/commits_${date}.txt"
+          echo "" >> "/tmp/commits_${date}.txt"
+
+          # Get all commits for this date
+          grep "^${date}" /tmp/all_commits.txt | while IFS='|' read -r datetime author message repo; do
+            echo "${repo}|${author}|${message}"
+          done | sort | awk -F'|' '
+            BEGIN { current_repo = "" }
+            {
+              repo = $1
+              author = $2
+              message = $3
+
+              if (repo != current_repo) {
+                if (current_repo != "") {
+                  print ""
+                }
+                current_repo = repo
+                count[repo]++
+                print "📦 " repo
+              }
+              print "  • [" author "] " message
+            }
+            END {
+              for (r in count) {
+                total += count[r]
+              }
+            }
+          ' >> "/tmp/commits_${date}.txt"
+
+          # Count commits for this date
+          COMMIT_COUNT=$(grep "^${date}" /tmp/all_commits.txt | wc -l | xargs)
+          echo "$COMMIT_COUNT" > "/tmp/count_${date}.txt"
+
+          # Get unique repos for this date
+          grep "^${date}" /tmp/all_commits.txt | cut -d'|' -f4 | sort -u > "/tmp/repos_${date}.txt"
         done
 
     - name: Send to Notion Database
@@ -83,10 +103,10 @@ jobs:
           ACTIVITIES=$(cat "/tmp/commits_${date}.txt" | jq -Rs . | head -c 2000 | jq -Rs .)
 
           # Count commits for this date
-          COMMIT_COUNT=$(cat "/tmp/commits_${date}.txt" | grep -c "^\-" || echo "0")
+          COMMIT_COUNT=$(cat "/tmp/count_${date}.txt")
 
           # Extract unique repositories
-          REPOS=$(cat "/tmp/commits_${date}.txt" | grep -o '\*\*[^*]*\*\*' | sed 's/\*\*//g' | sort -u | jq -R . | jq -s 'map({name: .})')
+          REPOS=$(cat "/tmp/repos_${date}.txt" | jq -R . | jq -s 'map({name: .})')
 
           # Create Notion page
           curl -X POST "https://api.notion.com/v1/pages" \
@@ -133,7 +153,7 @@ jobs:
         EOF
 
           echo "Report for $date sent to Notion successfully!"
-          sleep 1  # Rate limiting
+          sleep 1
         done
 
         echo "All reports sent to Notion!"
