@@ -1,0 +1,122 @@
+name: Daily Progress Report to Notion
+
+on:
+  schedule:
+    - cron: "0 13 * * *"  # JST 22:00 (UTC 13:00)
+  workflow_dispatch: {}   # Manual execution
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Fetch organization activity
+      id: fetch_activity
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # Fetch recent events from hey-watchme organization
+        SINCE=$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ')
+
+        echo "Fetching events since: $SINCE"
+
+        # Get all repositories in the organization
+        REPOS=$(gh api /orgs/hey-watchme/repos --paginate --jq '.[].name')
+
+        TOTAL_COMMITS=0
+        ACTIVITIES=""
+        ACTIVE_REPOS=""
+
+        for repo in $REPOS; do
+          echo "Checking repo: $repo"
+
+          # Get commits from the last 24 hours
+          COMMITS=$(gh api "/repos/hey-watchme/$repo/commits?since=$SINCE" --jq '.[] | "- [\(.commit.author.name)] \(.commit.message | split("\n")[0])"' 2>/dev/null || echo "")
+
+          if [ -n "$COMMITS" ]; then
+            COMMIT_COUNT=$(echo "$COMMITS" | wc -l | xargs)
+            TOTAL_COMMITS=$((TOTAL_COMMITS + COMMIT_COUNT))
+
+            ACTIVITIES="${ACTIVITIES}**${repo}**:\n${COMMITS}\n\n"
+
+            if [ -z "$ACTIVE_REPOS" ]; then
+              ACTIVE_REPOS="$repo"
+            else
+              ACTIVE_REPOS="${ACTIVE_REPOS}, ${repo}"
+            fi
+          fi
+        done
+
+        # If no activity, set default message
+        if [ $TOTAL_COMMITS -eq 0 ]; then
+          ACTIVITIES="No commits in the last 24 hours"
+          ACTIVE_REPOS="None"
+        fi
+
+        # Save to output (escape newlines for GitHub Actions)
+        echo "commits=$TOTAL_COMMITS" >> $GITHUB_OUTPUT
+        echo "active_repos=$ACTIVE_REPOS" >> $GITHUB_OUTPUT
+
+        # Save activities to a file to avoid issues with special characters
+        echo -e "$ACTIVITIES" > /tmp/activities.txt
+
+    - name: Send to Notion Database
+      env:
+        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+      run: |
+        NOW=$(date +'%Y-%m-%d')
+        COMMITS="${{ steps.fetch_activity.outputs.commits }}"
+        ACTIVE_REPOS="${{ steps.fetch_activity.outputs.active_repos }}"
+
+        # Read activities from file and escape for JSON
+        ACTIVITIES=$(cat /tmp/activities.txt | jq -Rs .)
+
+        # Create Notion page
+        curl -X POST "https://api.notion.com/v1/pages" \
+          -H "Authorization: Bearer $NOTION_TOKEN" \
+          -H "Content-Type: application/json" \
+          -H "Notion-Version: 2022-06-28" \
+          --data @- << EOF
+        {
+          "parent": {
+            "database_id": "$NOTION_DATABASE_ID"
+          },
+          "properties": {
+            "Title": {
+              "title": [
+                {
+                  "text": {
+                    "content": "Report $NOW"
+                  }
+                }
+              ]
+            },
+            "Date": {
+              "date": {
+                "start": "$NOW"
+              }
+            },
+            "Commits": {
+              "number": $COMMITS
+            },
+            "Activities": {
+              "rich_text": [
+                {
+                  "text": {
+                    "content": $(echo $ACTIVITIES | head -c 2000 | jq -Rs .)
+                  }
+                }
+              ]
+            },
+            "Repositories": {
+              "multi_select": $(echo "$ACTIVE_REPOS" | jq -R 'split(", ") | map({name: .})')
+            }
+          }
+        }
+        EOF
+
+        echo "Report sent to Notion successfully!"
